@@ -85,7 +85,7 @@ function App(props) {
   const [selectedNetwork, setSelectedNetwork] = useState(networkOptions[0]);
   const location = useLocation();
 
-  const targetNetwork = NETWORKS[selectedNetwork];
+  const targetNetwork = NETWORKS.rinkeby;
 
   // 🔭 block explorer URL
   const blockExplorer = targetNetwork.blockExplorer;
