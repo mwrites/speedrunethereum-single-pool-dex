@@ -1,358 +1,395 @@
-# 🏗 scaffold-eth | 🏰 BuidlGuidl
+# Links
+- [Original Version](https://medium.com/@austin_48503/%EF%B8%8F-minimum-viable-exchange-d84f30bd0c90)
+- https://github.com/squirtleDevs/scaffold-eth/tree/challenge-3-single-pool-dex
+- [spreedsheet that lets you tweak the values in yellow to see the other amounts change. It should help you conceptualize ](https://docs.google.com/spreadsheets/d/1iWCFlzdEXdn2DHmUdc7Oz-2r29piPj8anOctjlQsZUg/edit?usp=sharing)
+- https://hackernoon.com/formulas-of-uniswap-a-deep-dive
 
-## 🚩 Challenge 5: Minimum Viable Exchange
 
-This challenge will provide a tutorial to help you build/understand a simple decentralized exchange, with one token-pair (ERC20 BALLOONS ($BAL) and ETH). This readme is an upated version of the [original tutorial](https://medium.com/@austin_48503/%EF%B8%8F-minimum-viable-exchange-d84f30bd0c90). Please read the intro for a background on what we are building! There is also a Youtube video that may help you understand the concepts covered within this challenge too: https://www.youtube.com/watch?v=eP5w6Ger1EQ&t=364s&ab_channel=SimplyExplained.
+---
+# What
+[[DEX]]
 
-This branch was heavily based off of this branch: https://github.com/scaffold-eth/scaffold-eth-challenges/tree/challenge-5-dex.
+# Why
+[[DEX]]
+
+# How
+We want to create an automatic market where our contract will hold reserves of both ETH and 🎈 Balloons. These reserves will be funded by depositors (also called LP or liquidity providers).
+
+These reserves will provide liquidity that allows anyone to swap between the assets.
+
+The pricing of the tokens will be influenced by the ratio betwen ETH and Balloons. Indeed, for an Automated Market Maker to survive and be useful, it needs to always have liquidity. 
+
+So we want to strive for a ratio of 50:50 between ETH and Balloons. We can create a pricing algorithm based on the current ratios.
 
 ---
 
-### Checkpoint 0: 📦 install 📚
+# Deployment
+Before diving into the implementation, let's look at the deployment to understand the flow.
 
-_TODO: Update this with appropriate links_
+If you are deploying a new token, create a ERC20 contract, otherwise just get the address of an existing ERC20 contract (??? TEST THIS)
 
-```bash
-git clone https://github.com/scaffold-eth/scaffold-eth-challenges.git challenge-5-dex
-cd challenge-5-dex
-git checkout challenge-5-dex
-yarn install
+Optional, create a ERC20 contract:
+```js
+  await deploy("Balloons", {
+    // Learn more about args here: https://www.npmjs.com/package/hardhat-deploy#deploymentsdeploy
+    from: deployer,
+    // args: [ "Hello", ethers.utils.parseEther("1.5") ],
+    log: true,
+  });
 ```
 
-### Checkpoint 1: 🔭 Environment 📺
+Construct our DEX with the ERC20 contract address, (here it is balloons):
+```js
+	// ERC20 Contract
+  const balloons = await ethers.getContract("Balloons", deployer);
+	
+  await deploy("DEX", {
+    // Learn more about args here: https://www.npmjs.com/package/hardhat-deploy#deploymentsdeploy
+    from: deployer,
+    args: [balloons.address],
+    log: true,
+    waitConfirmations: 5,
+  });
+```
 
-You'll have three terminals up for:
+Optional, gift some ballons to a temporary address:
+```js
+// paste in your front-end address here to get 10 balloons on deploy:
+  await balloons.transfer(
+    "0x9A68B6258AcCC01Fc0260BBf86fD86D03B4a5Ce1",
+    "" + 10 * 10 ** 18
+  );
+```
 
-`yarn start` (react app frontend)
 
-`yarn chain` (hardhat backend)
+We need to fund the DEX with an inial amount of balloons, since we are transfering ERC20 tokens we will need to go through the [[Vendor#Approve Pattern]].
 
-`yarn deploy` (to compile, deploy, and publish your contracts to the frontend)
+First we approve an allowance of 100 🎈 Ballons (not Ethers):
+```js
+// uncomment to init DEX on deploy:
+console.log(
+    "Approving DEX (" + dex.address + ") to take Balloons from main account..."
+);
 
-Navigate to the Debug Contracts tab and you should see two smart contracts displayed called `DEX` and `Balloons`.
+// If you are going to the testnet make sure your deployer account has enough ETH
+await balloons.approve(dex.address, ethers.utils.parseEther("100"));
+```
 
-> 👩‍💻 Rerun `yarn deploy` whenever you want to deploy new contracts to the frontend (run `yarn deploy --reset` for a completely fresh deploy if you have made no contract changes).
+If we follow the approve pattern, at this point we would need to do a  `tokenTransferForm()`. Instead, we will use a function to initialize the fund. That function will do the actual transfer and do other book keeping things internally.
 
-`Balloons.sol` is just an example ERC20 contract that mints 1000 to whatever address deploys it.
-`DEX.sol` is what we will build in this tutorial and you can see it starts with a SafeMath library to help us prevent overflows and underflows and also tracks a token (ERC20 interface) that we set in the constructor (on deploy).
+We want to send a amount of tokens and pay in Ether which translates to this function signature:
+```solidity
+function init(uint256 tokens) public payable 
+```
+
+We initialize the fund with 5 balloons and 5 ethers. The `parseEther()` is here to help us do the 10^18 math:
+```js
+console.log("INIT exchange...");
+await dex.init(ethers.utils.parseEther("5"), {
+	value: ethers.utils.parseEther("5"),
+    gasLimit: 200000,
+});
+```
+
+**Quiz Time**:
+- [ ] Do you remember why we need to use the allowance pattern?
+- [ ] Can you guess why we would need a separate `init()` function instead of a  `deposit()`. If you don't it's ok we will go back to this later.
 
 ---
 
-### Checkpoint 2: Reserves
+# Recipe
+Now that we understand the deployment flow, let's implement the contracts.
 
-**Feature Details:** We want to create an automatic market where our contract will hold reserves of both ETH and 🎈 Balloons. These reserves will provide liquidity that allows anyone to swap between the assets.
+### 1. 🪙 Token
+First we need to add the token that the reserve will hold. Use an existing ERC20 Token or create a [[Create ERC20 Token]]. 
 
-Let’s add a couple new variables to `DEX.sol`:
+Inject that ERC20 Contract into the constructor:
+```solidity
+contract DEX {
+	IERC20 token; //instantiates the imported contract
+  
+    constructor(address token_addr) public {
+        token = IERC20(token_addr); //specifies the token address that will hook into the interface and be used through the variable 'token'
+    }
+}
+```
+> If you forgot what is the ERC20 token recipe, you can review the [[Token Vendor]] challenge.
 
+### 2.  🏦 Creating the Reserve
+Let's track the total amount of tokens we have. We also want to know how much each depositors added:
 ```
 uint256 public totalLiquidity;
 mapping (address => uint256) public liquidity;
 ```
 
-These variables track the total liquidity, but also by individual addresses too.
-Then, let’s create an init() function in `DEX.sol` that is payable and then we can define an amount of tokens that it will transfer to itself:
+**Quiz Time**:
+- [ ] Can you guess why do we need to track the liquidity of each depositors?
 
-```
-function init(uint256 tokens) public payable returns (uint256) {
-  require(totalLiquidity==0,"DEX:init - already has liquidity");
+Let's make a draft version. As we have seen in the deployment phase, we need a function to do the initial deposit:
+```solidity
+function init(uint256 tokens) public payable {
   totalLiquidity = address(this).balance;
   liquidity[msg.sender] = totalLiquidity;
-  require(token.transferFrom(msg.sender, address(this), tokens));
+  
+  token.transferFrom(msg.sender, address(this), tokens));
+}
+```
+- We can keep track of the `totalLiquidity`.
+- We also keep track of how the liquidity by depositor.
+- ETH has been paid thanks to the `payable` keyword on our function, but we still need to tell the ERC20 contract to transfer tokens from the sender to the DEX.
+
+Now that you understand the gist of it, let's make it safer:
+```solidity
+function init(uint256 tokens) public payable returns (uint256 totalLiquidity) {
+  require(totalLiquidity == 0, "init(): already has initial liquidity");
+  
+  totalLiquidity = address(this).balance;
+  liquidity[msg.sender] = totalLiquidity;
+  
+  require(token.transferFrom(msg.sender, address(this), tokens), "init(): failed to transfer tokens");
+  
   return totalLiquidity;
 }
-```
-
-Calling init() will load our contract up with both ETH and 🎈 Balloons.
-
-We can see that the DEX starts empty. We want to be able to call init() to start it off with liquidity, but we don’t have any funds or tokens yet. Add some ETH to your local account using the faucet and then find the `00_deploy_your_contract.js` file. Uncomment the line below and add your address:
 
 ```
-  // // paste in your address here to get 10 balloons on deploy:
-  // await balloons.transfer("YOUR_ADDRESS","" + (10 * 10 ** 18));
+- We check for errors with `require`.
+- And return the totalLiquidity.
+
+**Quiz Time:**
+- [ ] Why are we only keep track of ETH liquidity?
+- [ ] Do you remember what is the difference between `token.transfer()` and `toke.transferFrom()`? Why does `token.transferFrom()` needs approve while `token.transfer()` doesn't?
+- [ ] Can you guess why we would need a separate `init()` function instead of a  `deposit()`. If you don't it's ok we will go back to this later.
+
+
+### 3. 💹 Trading
+What does a DEX do again? A DEX is an exchange, so we need to provide a function to exchange tokens. Let's add functions to purchase and sell tokens:
+
+**Purchasing Tokens**
+
+We will allow users to buy tokens in exchange of ETH. Given the amount of ETH paid, the DEX will transfer and return the amount of token purchased:
+```solidity
+function ethToToken() public payable returns (uint256 tokenAmount)
 ```
 
-Run `yarn deploy`. The front end should show you that you have balloon tokens. We can’t just call init() yet because the DEX contract isn’t allowed to transfer tokens from our account. We need to approve() the DEX contract with the Balloons UI. Copy and paste the DEX address and then set the amount to 5000000000000000000 (5 _ 10¹⁸). You can confirm this worked using the allowance() function. Now we are ready to call init() on the DEX. We will tell it to take (5 _ 10¹⁸) of our tokens and we will also send 0.01 ETH with the transaction. You can see the DEX contract's value update and you can check the DEX token balance using the balanceOf function on the Balloons UI.
+A first draft:
+```solidity
+function ethToToken() public payable returns (uint256 tokenAmount) {
+	uint256 ethReserve = address(this).balance.sub(msg.value);
+    uint256 tokenReserve = token.balanceOf(address(this));
 
-This works pretty well, but it will be a lot easier if we just call the init() function as we deploy the contract. In the `00_deploy_your_contract.js` script try uncommenting the init section so our DEX will start with 3 ETH and 3 Balloons of liquidity:
+	uint256 tokenAmount = price(msg.value, ethReserve, tokenReserve);
+	token.transfer(msg.sender, tokenAmount);
 
-```
-  // // uncomment to init DEX on deploy:
-  // console.log("Approving DEX ("+dex.address+") to take Balloons from main account...")
-  // // If you are going to the testnet make sure your deployer account has enough ETH
-  // await balloons.approve(dex.address, ethers.utils.parseEther('100'));
-  // console.log("INIT exchange...")
-  // await dex.init("" + (3 * 10 ** 18), {value:ethers.utils.parseEther('3'), gasLimit:200000})
-```
-
-Now when we `yarn deploy --reset` then our contract should be initialized as soon as it deploys and we should have equal reserves of ETH and tokens.
-
----
-
-### Checkpoint 3: Price
-
-**Feature Details:** Follow along with the [original tutorial](https://medium.com/@austin_48503/%EF%B8%8F-minimum-viable-exchange-d84f30bd0c90) Price section for an understanding of the DEX's pricing model and for a price function to add to your contract. You may need to update the Solidity syntax (e.g. use + instead of .add, \* instead of .mul, etc). Deploy when you are done.
-
-### 🥅 Goals TODO
-
-- [ ] Do you understand how the x\*y=k price curve actually works? Write down a clear explanation for yourself and derive the formula for price. You might have to shake off some old algebra skills!
-- [ ] You should be able to go through the price section of this tutorial with the sample numbers and generate the same outputChange variable.
-
-> Hints: See this link (https://hackernoon.com/formulas-of-uniswap-a-deep-dive), solve for the change in the Output Reserve. Also, don't forget to think about how to implement the trading fee. Solidity doesn't allow for decimals, so one way that contracts are written to implement percentage is using whole uints (997 and 1000) as numerator and denominator factors, respectively.
-
----
-
-### Checkpoint 4: Trading
-
-**Feature Details:** Let’s edit the DEX.sol smart contract and add two new functions for swapping from each asset to the other.
-
-<details markdown='1'><summary>**Solution Code (don't look until you have tried!)** </summary>
-
-```
-function ethToToken() public payable returns (uint256) {
-  uint256 token_reserve = token.balanceOf(address(this));
-  uint256 tokens_bought = price(msg.value, address(this).balance - msg.value, token_reserve);
-  require(token.transfer(msg.sender, tokens_bought));
-  return tokens_bought;
-}
-
-function tokenToEth(uint256 tokens) public returns (uint256) {
-  uint256 token_reserve = token.balanceOf(address(this));
-  uint256 eth_bought = price(tokens, token_reserve, address(this).balance);
-  (bool sent, ) = msg.sender.call{value: eth_bought}("");
-  require(sent, "Failed to send user eth.");
-  require(token.transferFrom(msg.sender, address(this), tokens));
-  return eth_bought;
+	return tokenAmount;
 }
 ```
+Let's look at it from bottom to top:
+1. We tell the ERC20 contract to transfer `tokenAmount` of tokens.
+2. To know how much tokens the user can buy, we need a `price` function.
+3. The `price` function will: Given the current ratio of ETH/Tokens and the ETH paid, tell us how many tokens the user can buy.
+4. We get the reserves of ETH and Tokens in our DEX.
+5. Finally note the `payable` keyword which does the ETH payment for us.
 
-</details>
+A more complete version:
+```
+event EthToTokenSwap(address payer, string txDetails, uint256 ethAmount, uint256 tokenAmount);    
+    
+function ethToToken() public payable returns (uint256 tokenAmount) {
+	require(msg.value > 0, "ethToToken(): cannot swap 0 ETH");
 
-Each of these functions calculate the resulting amount of output asset using our price function that looks at the ratio of the reserves vs the input asset. We can call tokenToEth and it will take our tokens and send us ETH or we can call ethToToken with some ETH in the transaction and it will send us tokens. Let’s deploy our contract then move over to the frontend. Exchange some ETH for tokens and some tokens for ETH!
+	uint256 ethReserve = address(this).balance.sub(msg.value);
+	uint256 tokenReserve = token.balanceOf(address(this));
+	uint256 tokenAmount = price(msg.value, ethReserve, tokenReserve);
 
----
+	require(token.transfer(msg.sender, tokenAmount), "ethToToken(): Failed to transfer tokens");
+	
+	emit EthToTokenSwap(msg.sender, "ethToToken(): Sold Balloons for ETHs", msg.value, tokenAmount);
+	
+	return tokenAmount;
+}
 
-### Checkpoint 5: Liquidity
+```
+- We can check for errors with `require`.
+- We define and `emit` an event for the purchase.
+- We return the amount of token purchased.
 
-**Feature Details:** So far, only the init() function controls liquidity. To make this more decentralized, it would be better if anyone could add to the liquidity pool by sending the DEX both ETH and tokens at the correct ratio.
+**Quick Time:**
+- [ ] Why do we need to do `balance.sub(msg.value)` ? Is balance updated before or after payable?
+- [ ] Why are we not using `token.transferFrom()` here?
+- [ ] If `token.transfer()` fails, what happen to the ETH paid?
+- [ ] Do we need the user to do the approve before calling this function?
+
+
+**Selling Tokens**
+We will allow users to sell tokens to gain ETH. Given an amount of tokens, we will transfer and return the amount of ETH gained:
+```solidity
+function tokenToEth(tokenAmount) public returns (uint256 ethAmount)
+```
+
+A first draft:
+```solidity
+function tokenToEth(tokenAmount) public returns (uint256 ethAmount) {
+	token.transferFrom(msg.sender, address(this), tokenAmount);
+
+	uint256 ethReserve = address(this).balance;
+	uint256 tokenReserve = token.balanceOf(address(this));
+	uint256 ethAmount = price(tokenAmount, tokenReserve, ethReserve);
+
+	(bool success, bytes memory data) = _to.call{value: ethAmount}("");
+	return ethAmount;
+}
+```
+Let's look at it from bottom to top:
+1. We pay ETH to the user. ([[Send Ether]])
+2. Before sending ETH, we need to figure out how much ETH we can send.
+3. Here comes the `price` function again which will, given the current ratio of ETH/Tokens and the ETH paid, tell us how much ETHs the user will receive.
+4. Pay attention to the order of arguments for `price`, it is not the same as in `ethToToken`!
+5. Get the reserves, you know the drill. But this time we just need the current balance of ether: `.balance`.
+6. We need to sell the tokens, so like in the initial deposit, we tell the ERC20 contract to `token.transferFrom()`  tokens.
+
+A complete version:
+```solidity
+event TokenToEthSwap(address payer, string txDetails, uint256 tokenAmount, uint256 ethAmount);
+
+function tokenToEth(uint256 tokenAmount) public returns (uint256 ethAmount) {
+	require(tokenAmount > 0, "tokenToEth(): cannot purchase 0 tokens");
+
+	require(token.transferFrom(msg.sender, address(this), tokenAmount), "tokenToEth(): failed to transfer tokens");
+
+	uint256 ethReserve = address(this).balance;
+	uint256 tokenReserve = token.balanceOf(address(this));
+	uint256 ethAmount = price(tokenAmount, tokenReserve, address(this).balance);
+
+	(bool success, bytes memory data) = msg.sender.call{value: ethAmount}("");
+	require(success, "tokenToEth(): failed to send eth to user");
+	
+	emit TokenToEthSwap(msg.sender, "Purchased Balloons for ETHs", ethAmount, tokenAmount);
+	return ethAmount;
+}
+```
+- Error handling with `require`.
+- Define and `emit`  an event for 🎈 balloons purchased.
+
+
+- [ ] Do you remember what the use of `token.transferFrom()` implies?
+
+### 3. 🏷 Pricing
+
+We have used the `price` function in the token exchange functions. It is time to implement this function. We want to use a simple formula to determine the exchange rate between the two.
+
+
+###  4. 🌊 Liquidity
+**Depositing Liquidity**
+So far, only the `init()` function controls liquidity. To make this more decentralized, it would be better if anyone could add to the liquidity pool by sending the DEX both ETH and tokens at the correct ratio.
+
 Let’s create two new functions that let us deposit and withdraw liquidity. How would you write this function out? Try before taking a peak!
 
-<details markdown='1'><summary>**Solution Code (don't look until you have tried!)** </summary>
+We need to deposit both tokens and ETH:
+- [ ] How do you transfer ETH to a contract?
+- [ ] Why can't we just put the amount of Tokens in the function argument?
+- [ ] How do you send ERC20 Tokens to a contract?
+- [ ] Remember to keep track of total liquidity and liquidity by depositors.
 
+- 💡 Hint: Here's what the signature should look like:
 ```
-function deposit() public payable returns (uint256) {
-  uint256 eth_reserve = address(this).balance - msg.value;
-  uint256 token_reserve = token.balanceOf(address(this));
-  uint256 token_amount = ((msg.value * token_reserve) / eth_reserve) + 1;
-  uint256 liquidity_minted = (msg.value * totalLiquidity) / eth_reserve;
-  liquidity[msg.sender] += liquidity_minted;
-  totalLiquidity += liquidity_minted;
-  require(token.transferFrom(msg.sender, address(this), token_amount));
-  return liquidity_minted;
+function deposit() public payable
+```
+
+
+🔑  Solution:
+```solidity
+event LiquidityProvided(address payer, uint256 tokenInput, uint256 ethInput, uint256 liquidityMinted);
+
+
+function deposit() public payable returns (uint256 tokens) {
+	// do we need this? require(msg.vaue > 0, "deposit(): ETH must be > 0");
+
+	// the eth before the payment
+	uint256 ethReserve = address(this).balance.sub(msg.value);
+	uint256 tokenReserve = token.balanceOf(address(this));
+	tokens = (msg.value.mul(tokenReserve) / ethReserve).add(1);
+
+	uint256 liquidityMinted = msg.value.mul(totalLiquidity) / ethReserve;
+	liquidity[msg.sender] = liquidity[msg.sender].add(liquidityMinted);
+	totalLiquidity = totalLiquidity.add(liquidityMinted);
+
+	require(token.transferFrom(msg.sender, address(this), tokens), "deposit(): failed to transfer tokens");
+
+	emit LiquidityProvided(msg.sender, liquidityMinted, msg.value, tokens);
+	return tokens;
 }
+```
+From bottom to top:
+1. Token transfer is handled by  `token.transferFrom`.
+2. We figure out the equivalent of tokens that will be deposited based on reserves ratio and the ETH paid.
+3. We also need to keep track of the liquidity.
+4. ETH transfer is handled by the `payable` keyword.
 
-function withdraw(uint256 liq*amount) public returns (uint256, uint256) {
-uint256 token_reserve = token.balanceOf(address(this));
-uint256 eth_amount = (liq_amount * address(this).balance) / totalLiquidity;
-uint256 token*amount = (liq_amount * token_reserve) / totalLiquidity;
-liquidity[msg.sender] -= liq_amount;
-totalLiquidity -= liq_amount;
-(bool sent, ) = msg.sender.call{value: eth_amount}("");
-require(sent, "Failed to send user eth.");
-require(token.transfer(msg.sender, token_amount));
-return (eth_amount, token_amount);
+Since we are using `token.transferFrom` the user will have to give the DEX approval to spend their tokens on their behalf by calling the `approve()` function prior to this function call. After the `deposit()` is called, equals parts of both assets will be removed from the user's wallet with respect to the price outlined by the AMM.
+
+**Quiz Time:**
+- [ ] Do you understand why we need to do the `.sub` in `ethReserve = address(this).balance.sub(msg.value);`
+- [ ] Do you understand why `tokens = (msg.value.mul(tokenReserve) / ethReserve).add(1);` ?
+- [ ] Do you understand why `liquidityMinted = msg.value.mul(totalLiquidity) / ethReserve;`
+
+**Withdrawing Liquidity**
+
+The `withdraw()` function lets a user take both ETH and $BAL tokens out at the correct ratio. The actual amount of ETH and tokens a liquidity provider withdraws could be higher than what they deposited because of the 0.3% fees collected from each trade. It also could be lower depending on the price fluctuations of $BAL to ETH and vice versa (from token swaps taking place using your AMM!). The 0.3% fee incentivizes third parties to provide liquidity, but they must be cautious of [Impermanent Loss (IL)](https://www.youtube.com/watch?v=8XJ1MSTEuU0&t=2s&ab_channel=Finematics).
+
+**Guides:**
+- [ ] Which function will you use to transfer ETH to the user?
+- [ ] Which function will you use to transfer Tokens to the user?
+- [ ] How to calcualte the amount of ETH and Token?
+
+
+💡 Hint: 
+
+
+🔑 Solution:
+```solidity
+function withdraw(uint256 amount) public returns (uint256 ethOutput, uint256 tokenOutput) {
+	// WTF is amount?
+	// WTF is liquidity, what are we comparing here?
+	require(liquidity[msg.sender] >= amount, "withdraw(): user does not have enough liquidity to withdraw.");
+
+	// calculating amount of eth and token we can get based on reserves and liquidity.
+	uint256 ethReserve = address(this).balance;
+	uint256 tokenReserve = token.balanceOf(address(this));
+	uint256 ethOutput = amount.mul(ethReserve) / totalLiquidity;
+	uint256 tokenOutput = amount.mul(tokenReserve) / totalLiquidity;
+
+	// receiving ETHs and Tokens
+	(bool success, bytes memory data) = payable(msg.sender).call{ value: ethOutput}("");
+	require(success, "tokenToEth(): failed to send eth to user");
+	require(token.transfer(msg.sender, amount), "widthdraw(): failed to transfer tokens.");
+
+	emit LiquidityRemoved(msg.sender, amount, ethOutput, tokenOutput);
+	return (ethOutput, tokenOutput);
 }
-
 ```
+From bottom to top:
+1. We update liquidity.
+2. To send Tokens, instead of using `transferFrom` we can directly use `transfer` because we are not taking Tokens from the user, we are giving Tokens.
+3. We can send ETH as we did in `tokenToEth()`.
+4. But before that we need to figure out how much ETHs and Tokens we can withdraw with: `amount * reserve / totalLiquidity`
+5. 
 
-Take a second to understand what these functions are doing after you paste them into DEX.sol in packages/hardhat/contracts:
-The deposit() function receives ETH and also transfers tokens from the caller to the contract at the right ratio. The contract also tracks the amount of liquidity the depositing address owns vs the totalLiquidity.
-The withdraw() function lets a user take both ETH and tokens out at the correct ratio. The actual amount of ETH and tokens a liquidity provider withdraws will be higher than what they deposited because of the 0.3% fees collected from each trade. This incentivizes third parties to provide liquidity. </details>
+> With this current code, the msg caller could end up getting very little back if the liquidity is super low in the pool. I guess they could see that with the UI.
 
-### 🥅 Goals TODO
+**Quiz Time:**
+- [ ] Why are we using `token.transfer` instead of `token.transferFrom`?
+- [ ] Why do we need to add `payable()`?
+- [ ] What is liquidity actually? Eth, Balloons or???
 
-- [ ] Deposit liquidity, and then check your liquidity amount through the mapping. Has it changed properly? Did the right amount of assets get deposited?
-- [ ] What happens if you deposit(), then another user starts swapping out for most of the balloons, and then you try to withdraw your position as a liquidity provider? Answer: you should get the amount of liquidity proportional to the ratio of assets within the isolated liquidity pool.
+### 🥅 Goals / Checks
+
+Remember that you will need to call `approve()` from the `Balloons.sol` contract approving the DEX to handle a specific number of your $BAL tokens. To keep things simple, you can just do that when interacting with the UI or debug tab with your contract.
+
+-    💧 Deposit liquidity, and then check your liquidity amount through the mapping in the debug tab. Has it changed properly? Did the right amount of assets get deposited?
+-    🧐 What happens if you `deposit()` at the beginning of the deployed contract, then another user starts swapping out for most of the balloons, and then you try to withdraw your position as a liquidity provider? Answer: you should get the amount of liquidity proportional to the ratio of assets within the isolated liquidity pool. It will not be 1:1
 
 ---
 
-### Checkpoint 6: UI
+### 🥅 Extra Challenge:
 
-TODO: <details markdown='1'><summary>Context for people newer to ReactJS</summary> For those that are really new to anything front-end development, there are many resources out there to possibly use. This one was particularly helpful from minutes 15 to 20 describing the typical folder structure within a ReactJS project.
-https://www.youtube.com/watch?v=w7ejDZ8SWv8&ab_channel=TraversyMedia
-
- </details>
-
-TODO:
-\*From a fresh master branch off of scaffold-eth repo, we found the following was needed to get things hooked up with the front-end:
-
-1. Update index.js file within components sub-directory to include some things from the OG challenge repos:
-
-```
-export { default as Dex } from "./DEX";
-export { default as Curve } from "./Curve";
-```
-
-2. Other files you'll need from OG repo: DEX.jsx, Curve.jsx
-   TODO: INSERT LINKS TO OG REPO
-
-3. You will likely run into errors from your front-end assuming you've ran `yarn start` already. Let's fix those!
-
-Find useEventListener, useContractLoader, useContractReader, useBlockNumber, useBlanace, useTokenBalance within DEX.jsx file. You will see them calling for .hooks --> delete those and replace with the following:
-
-```
-import { useEventListener } from "eth-hooks/events/useEventListener";
-import { useContractLoader } from "eth-hooks";
-import { useContractReader } from "eth-hooks";
-import { useBlockNumber } from "eth-hooks";
-import { useBalance } from "eth-hooks";
-import { useTokenBalance } from "eth-hooks/erc/erc-20/useTokenBalance";
-```
-
-These replacements are needed because the pointers within the `DEX.jsx` and `Curve.jsx` files from the OG repo are not accurate with the `master branch` off of `scaffold-eth` repo.
-
-In 00_deploy_your_contracts.js, you'll have to write in the necessary code to get your contracts, using Ethers.js.
-
-As well, make sure that the tags are updated to your contract names, it should be something like `module.exports.tags = ["YourContract"];` and you'll want to change it to:
-
-`module.exports.tags = ["Balloons", "DEX"];`
-
-**Further Check-Ups between DEX in Ch-3 and Ch-5**
-
-TODO: CLEAN THIS DOC UP
-
-What's in Ch-5 but not Ch-3
-_Imports_
-Blockies
-Missing Button and List
-DownloadOutlined and UploadOutlined
-
-```
-import { Card, Col, Divider, Input, Row } from "antd"; 😎
-import { useBalance, useContractReader, useBlockNumber } from "eth-hooks"; 😎
-.
-.
-.
-importing Address, TokenBalance are coming from their respectively named subdirectories: "./Address;," and "./TokenBalance;" 😎
-.
-.
-.
-export default function DEX(props) {etc.} <-- this line may have the wrong name, be careful because you are likely exporting Dex, not DEX. --> challnege 3 has Dex, ch5 has DEX
-.
-.
-.
-  const ethBalance = useBalance(contractAddress, props.localProvider);
-😭 breaks challenge 3 code!
-.
-const tx = Transactor(props.injectedProvider...) is different than challenge 3 set up for const tx... in ch3 it is set up so we do not use injectedProvider 😎
-.
-.
-.
-const contractAddress = ternary operators in challenge5, whereas in challenge3 it is just direct, no ternary.
-.
-.
-.
-const tokenBalance = useTokenBalance --> this is different but we think it isn't breaking changes.
-.
-.
-.
-nonce is in challenge 5 and not challenge 3.
-.
-.
-let swapTx differs just cause of nonce showing up.
-.
-.
-consolelogging extras
-.
-.
-let addingEth = 0 is in challenge 5.
-.
-.
-Balloons button is in Challenge 3 DEX not Challenge 5 DEX
-
-```
-
-### Front-End (without the debug tab)
-
-So the debug tab was taken care, or should be working now if all pointers have been corrected and variables instantiated, respectively.
-
-The front-end is brought in through several steps.
-
-State the aspects within the actual front-end display. First, find the comment in your `App.jsx`:
-`{/* pass in any web3 props to this Home component. For example, yourLocalBalance */}`
-
-There you will see the debug code blob below it, it is here where you will outline details for your home-page. Follow the medium blog post and you will see two inputs to bring into your `App.jsx` file:
-
-**TODO: NOTE TO SELF TO FIX THIS PART AS I'M NOT GETTING THE DEX TO LOAD ON THE FRONT END! ONLY BALLOONS :(**
-
-```
-<DEX
-  address={address}
-  injectedProvider={injectedProvider}
-  localProvider={localProvider}
-  mainnetProvider={mainnetProvider}
-  readContracts={readContracts}
-  price={price}
-/>
-
-<Contract
-  title={"🎈 Balloons"}
-  name={"Balloons"}
-  show={["balanceOf","approve"]}
-  provider={localProvider}
-  address={address}
-/>
-```
-
-Your front-end should now load accordingly!
-
-In App.jsx, look at line 460 onwards at the Dex component, and then the Contracts for DEX and Balloons. This is where they are loaded onto the main UI. With these, the user can enter the amount of ETH or tokens they want to swap, and the chart will display how the price is calculated. You can also visualize how larger swaps result in more slippage and less output asset. You can also deposit and withdraw from the liquidity pool, earning fees.
-
----
-
-### Checkpoint 7: 💾 Deploy it! 🛰
-
-📡 Edit the `defaultNetwork` in `packages/hardhat/hardhat.config.js`, as well as `targetNetwork` in `packages/react-app/src/App.jsx`, to [your choice of public EVM networks](https://ethereum.org/en/developers/docs/networks/)
-
-👩‍🚀 You will want to run `yarn account` to see if you have a **deployer address**
-
-🔐 If you don't have one, run `yarn generate` to create a mnemonic and save it locally for deploying.
-
-🛰 Use an [instantwallet.io](https://instantwallet.io) to fund your **deployer address** (run `yarn account` again to view balances)
-
-> 🚀 Run `yarn deploy` to deploy to your public network of choice (😅 wherever you can get ⛽️ gas)
-
-🔬 Inspect the block explorer for the network you deployed to... make sure your contract is there.
-
-👮 Your token contract source needs to be **verified**... (source code publicly available on the block explorer)
-
-### Checkpoint 8: 📜 Contract Verification
-
-Update the api-key in packages/hardhat/package.json file. You can get your key [here](https://etherscan.io/myapikey).
-
-![Screen Shot 2021-11-30 at 10 21 01 AM](https://user-images.githubusercontent.com/9419140/144075208-c50b70aa-345f-4e36-81d6-becaa5f74857.png)
-
-> Now you are ready to run the `yarn verify --network your_network` command to verify your contracts on etherscan 🛰
-
-This will be the URL you submit to [SpeedRun](https://speedrunethereum.com).
-
----
-
-### Checkpoint 9: 🚢 Ship it! 🚁
-
-📦 Run `yarn build` to package up your frontend.
-
-💽 Upload your app to surge with `yarn surge` (you could also `yarn s3` or maybe even `yarn ipfs`?)
-
-🚔 Traffic to your url might break the [Infura](https://infura.io/) rate limit, edit your key: `constants.js` in `packages/ract-app/src`.
-
----
-
-> 💬 Problems, questions, comments on the stack? Post them to the [🏗 scaffold-eth developers chat](https://t.me/joinchat/F7nCRK3kI93PoCOk)
-
-```
-
-```
-
-```
-
-```
+- [ ] `approve()` event emission: can you implement this into the event tabs so that it is clear when `approve()` from the `Balloons.sol` contract has been executed?
