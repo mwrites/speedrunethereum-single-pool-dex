@@ -1,4 +1,4 @@
- Links
+# Links
 - [Try it Live!](https://mwrites-dex.surge.sh/)
 - [Original Version](https://medium.com/@austin_48503/%EF%B8%8F-minimum-viable-exchange-d84f30bd0c90)
 - https://github.com/squirtleDevs/scaffold-eth/tree/challenge-3-single-pool-dex
