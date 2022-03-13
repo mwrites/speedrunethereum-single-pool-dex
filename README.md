@@ -1,4 +1,5 @@
-# Links
+ Links
+- [Try it Live!](https://mwrites-dex.surge.sh/)
 - [Original Version](https://medium.com/@austin_48503/%EF%B8%8F-minimum-viable-exchange-d84f30bd0c90)
 - https://github.com/squirtleDevs/scaffold-eth/tree/challenge-3-single-pool-dex
 - [spreedsheet that lets you tweak the values in yellow to see the other amounts change. It should help you conceptualize ](https://docs.google.com/spreadsheets/d/1iWCFlzdEXdn2DHmUdc7Oz-2r29piPj8anOctjlQsZUg/edit?usp=sharing)
